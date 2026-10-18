@@ -1,10 +1,11 @@
 <!DOCTYPE html>
+<!-- Aplikasi Layanan BK | Versi 1.3.0 | Build 2026-10-18 -->
 <html lang="id">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#1a73e8">
-<title>Aplikasi Layanan BK</title>
+<title>Aplikasi Layanan BK v1.3.0</title>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -401,6 +402,10 @@ body.dark .wa-class-title{color:#7fb8f5}
 body.dark .wa-class-title span{color:#8ba0b3!important}
 body.dark .wa-class-title+span{color:#8ba0b3}
 .siswa-table table{min-width:650px;font-size:11.5px}.siswa-table th{padding:6px 7px;letter-spacing:.2px}.siswa-table td{padding:6px 7px;vertical-align:middle}.siswa-table .right{justify-content:flex-start}
+.ver-badge{display:inline-block;font-size:10.5px;font-weight:700;background:rgba(255,255,255,.2);color:inherit;padding:2px 8px;border-radius:20px;margin-left:8px;cursor:pointer;border:none;letter-spacing:.3px}
+.ver-badge:hover{background:rgba(255,255,255,.35)}
+.ver-side{padding:12px 16px;font-size:11px;color:#8494a4;cursor:pointer}
+.ver-side:hover{color:#1a73e8}
 </style>
 </head>
 <body>
@@ -417,6 +422,7 @@ body.dark .wa-class-title+span{color:#8ba0b3}
     <div class="fg"><label>Password / Tanggal Lahir Siswa</label><input id="lgPass" type="text" placeholder="Password guru / YYYY-MM-DD siswa" autocomplete="current-password" inputmode="text"></div>
     <button class="btn" style="width:100%;padding:12px" onclick="doLogin()">Masuk</button>
     <div class="small" style="text-align:center;margin-top:18px">© SMA Negeri 1 Klirong</div>
+    <div class="small" style="text-align:center;margin-top:4px"><a href="#" id="verLogin" onclick="showChangelog();return false;" style="color:inherit"></a></div>
   </div>
 </div>
 
@@ -424,7 +430,7 @@ body.dark .wa-class-title+span{color:#8ba0b3}
   <div class="top">
     <div style="display:flex;align-items:center;gap:10px">
       <button class="burger" onclick="document.getElementById('side').classList.toggle('open')">☰</button>
-      <div class="brand"><span>Aplikasi Layanan BK</span></div>
+      <div class="brand"><span>Aplikasi Layanan BK</span><button class="ver-badge" id="verTop" onclick="showChangelog()" title="Lihat riwayat versi"></button></div>
     </div>
     <div class="who">
       <span id="whoTxt"></span>
@@ -858,6 +864,7 @@ async function _apiImpl(action, payload){
     case 'saveRecord': {
       var shS = payload.sheet;
       var dS  = Object.assign({}, payload.data||{});
+      await ttdProsesRecord(shS, dS);
       var tS  = TABLES[shS];
       if(!tS) throw new Error('Sheet tidak dikenal: '+shS);
       var idS = idOf(shS, dS);
@@ -883,6 +890,7 @@ async function _apiImpl(action, payload){
 
     case 'updateRecord': {
       var shU = payload.sheet, idU = payload.id, patch = payload.data||{};
+      patch = Object.assign({}, patch); await ttdProsesRecord(shU, patch);
       var tU = TABLES[shU];
       if(!tU) throw new Error('Sheet tidak dikenal: '+shU);
       var pkU = pkOf(shU);
@@ -1534,7 +1542,7 @@ function initSigPads(){
       canvas.width=Math.floor(w*ratio); canvas.height=Math.floor(h*ratio);
       ctx=canvas.getContext('2d'); ctx.setTransform(ratio,0,0,ratio,0,0); ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='#111';
       var hidden=document.getElementById('f_'+key); var src=hidden&&hidden.value;
-      if(src && /^data:image\//.test(src)){ var img=new Image(); img.onload=function(){ctx.drawImage(img,0,0,w,h);}; img.src=src; }
+      if(src && /^(data:image\/|https?:\/\/)/.test(src)){ var img=new Image(); if(/^https?:/.test(src)) img.crossOrigin='anonymous'; img.onload=function(){ctx.drawImage(img,0,0,w,h);}; img.onerror=function(){}; img.src=src; }
     }
     sizeCanvas();
     var drawing=false, moved=false;
@@ -2997,6 +3005,570 @@ function refreshMyGuru(){
     .catch(function(e){ toast(e.message,'er'); });
 }
 
+/* ====== TANDA TANGAN -> SUPABASE STORAGE ====== */
+var TTD_BUCKET = 'ttd';
+var TTD_FIELDS = {};
+TTD_FIELDS[SH.KR] = ['TTD1','TTD2','TTD_Ortu'];
+TTD_FIELDS[SH.PANGGILAN] = ['TTD_Ortu'];
+
+function ttdIsDataURL(v){ return typeof v === 'string' && /^data:image\/(png|jpeg|jpg|webp);base64,/i.test(v); }
+function ttdDataURLtoBlob(d){
+  var m = d.match(/^data:([^;]+);base64,(.*)$/i);
+  var bin = atob(m[2]), arr = new Uint8Array(bin.length);
+  for(var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return { blob: new Blob([arr], { type: m[1] }), type: m[1] };
+}
+async function ttdNamaFile(d, ext){
+  var id = '';
+  try{
+    if(window.crypto && crypto.subtle){
+      var buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(d));
+      id = Array.prototype.map.call(new Uint8Array(buf), function(b){ return ('0' + b.toString(16)).slice(-2); }).join('');
+    }
+  }catch(e){}
+  if(!id) id = Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+  return 'kegiatan/' + id + '.' + ext;
+}
+/* Unggah satu gambar data-URL ke bucket; kembalikan URL publik. Melempar error jika gagal. */
+async function ttdUnggah(dataUrl){
+  var sb = sbClient();
+  var x = ttdDataURLtoBlob(dataUrl);
+  var ext = x.type.indexOf('png') >= 0 ? 'png' : (x.type.indexOf('webp') >= 0 ? 'webp' : 'jpg');
+  var path = await ttdNamaFile(dataUrl, ext);
+  var up = await sb.storage.from(TTD_BUCKET).upload(path, x.blob, { contentType: x.type, upsert: true, cacheControl: '31536000' });
+  if(up.error) throw up.error;
+  var pu = sb.storage.from(TTD_BUCKET).getPublicUrl(path);
+  if(!pu || !pu.data || !pu.data.publicUrl) throw new Error('URL publik tidak tersedia');
+  return pu.data.publicUrl;
+}
+/* Dipanggil saat saveRecord/updateRecord: ganti field TTD berisi base64 dengan URL storage. */
+async function ttdProsesRecord(sheet, obj){
+  var fields = TTD_FIELDS[sheet]; if(!fields || !obj) return;
+  for(var i = 0; i < fields.length; i++){
+    var f = fields[i], v = obj[f];
+    if(!ttdIsDataURL(v)) continue;
+    try{
+      obj[f] = await ttdUnggah(v);
+    }catch(e){
+      toast('⚠️ Tanda tangan disimpan di database karena gagal diunggah ke storage: ' + (e && e.message ? e.message : e) + '. Pastikan bucket "' + TTD_BUCKET + '" sudah dibuat.', 'er');
+    }
+  }
+}
+
+/* ---- migrasi data lama (base64 di database -> storage) ---- */
+var TTD_MIGRASI = [
+  { tabel:'bk_kunjungan_rumah', kolom:['ttd1','ttd2','ttd_ortu'] },
+  { tabel:'bk_panggilan_ot',    kolom:['ttd_ortu'] }
+];
+function migrasiTTDKeStorage(){
+  confirmBox('Pindahkan semua tanda tangan lama (Home Visit dan Pertemuan Orang Tua) dari database ke Storage?\n\nProses ini mengubah isi database. Sebaiknya lakukan Backup terlebih dahulu. Biarkan halaman tetap terbuka sampai selesai.', function(){
+    jalankanMigrasiTTD();
+  });
+}
+async function jalankanMigrasiTTD(){
+  var sb = sbClient();
+  openModal('Memindahkan Tanda Tangan…',
+    '<div id="mgProg" style="font-size:13.5px;line-height:1.7">Menyiapkan…</div><div id="mgFail" class="small" style="margin-top:10px;max-height:140px;overflow-y:auto"></div>',
+    '<button class="btn2" disabled id="mgClose">Tunggu…</button>');
+  var ok = 0, gagal = 0, bar = function(t){ var e = document.getElementById('mgProg'); if(e) e.innerHTML = t; };
+  var fail = function(t){ var e = document.getElementById('mgFail'); if(e) e.innerHTML += t + '<br>'; };
+  try{
+    for(var ti = 0; ti < TTD_MIGRASI.length; ti++){
+      var T = TTD_MIGRASI[ti];
+      for(var ki = 0; ki < T.kolom.length; ki++){
+        var kol = T.kolom[ki], macet = false;
+        while(!macet){
+          var q = await sb.from(T.tabel).select('id,' + kol).like(kol, 'data:image%').limit(20);
+          if(q.error) throw q.error;
+          var rows = q.data || [];
+          if(!rows.length) break;
+          var progres = 0;
+          for(var ri = 0; ri < rows.length; ri++){
+            var r = rows[ri];
+            bar('Tabel <b>' + T.tabel + '</b> kolom <b>' + kol + '</b><br>✅ Berhasil: ' + ok + ' &nbsp; ❌ Gagal: ' + gagal);
+            try{
+              var url = await ttdUnggah(r[kol]);
+              var patch = {}; patch[kol] = url;
+              var u = await sb.from(T.tabel).update(patch).eq('id', r.id);
+              if(u.error) throw u.error;
+              ok++; progres++;
+            }catch(e){
+              gagal++;
+              fail('❌ ' + T.tabel + '.' + kol + ' (id ' + esc(String(r.id)) + '): ' + esc(e && e.message ? e.message : String(e)));
+            }
+          }
+          if(!progres) macet = true;
+        }
+      }
+    }
+    bar('🎉 <b>Selesai.</b><br>✅ Dipindahkan: <b>' + ok + '</b> &nbsp; ❌ Gagal: <b>' + gagal + '</b>' + (gagal ? '<br>Jika gagal, periksa bucket &amp; policy storage lalu jalankan ulang (yang sudah berhasil tidak diproses lagi).' : ''));
+  }catch(e){
+    bar('❌ Proses berhenti: ' + esc(e && e.message ? e.message : String(e)) + '<br>✅ Dipindahkan sebelum berhenti: ' + ok);
+  }
+  invalidateCache('HADIR'); ST.cache = ST.cache || {};
+  Object.keys(ST.cache).forEach(function(k){ if(/kr|panggilan|kunjungan/i.test(k)) invalidateCache(k); });
+  var c = document.getElementById('mgClose'); if(c){ c.disabled = false; c.textContent = 'Tutup'; c.onclick = closeModal; }
+}
+/* ====== END TANDA TANGAN -> STORAGE ====== */
+
+/* ====== VERSI APLIKASI ====== */
+var APP_VERSION = '1.3.0';
+var APP_BUILD   = '2026-10-18';
+var APP_CHANGELOG = [
+  { v:'1.3.0', tgl:'2026-10-18', cat:[
+    'Tanda tangan Home Visit & Pertemuan Orang Tua kini disimpan di Supabase Storage (bucket ttd), bukan base64 di database',
+    'Setting > Backup: tombol migrasi tanda tangan lama ke Storage',
+    'Tanda tangan tampil kembali saat edit; cetak menunggu gambar selesai dimuat'
+  ]},
+  { v:'1.2.1', tgl:'2026-10-18', cat:[
+    'Menu Presensi: tab "Daftar Absensi Hari Ini" dipindah setelah "Harian" dan diganti nama menjadi "Daftar Siswa Tidak Masuk Hari Ini"'
+  ]},
+  { v:'1.2.0', tgl:'2026-10-18', cat:[
+    'Laporan ke Orang Tua: tambah kolom Template Pesan WhatsApp yang bisa diedit (variabel otomatis, simpan otomatis, pratinjau, reset ke standar)'
+  ]},
+  { v:'1.1.0', tgl:'2026-10-18', cat:[
+    'Menu baru: Laporan ke Orang Tua (WhatsApp) — laporan presensi (Sakit/Izin/Alpa) dan keterlambatan',
+    'Satu pesan berisi 2 bagian: laporan bulan terpilih dan laporan tahun ajaran (sejak Juli 2026)',
+    'Pesan "selalu hadir dan tidak pernah terlambat" bila tidak ada data',
+    'Pesan penutup: bimbingan orang tua, kerja sama semua pihak, dan terima kasih',
+    'Nomor versi ditampilkan di layar login, header, dan sidebar'
+  ]},
+  { v:'1.0.0', tgl:'-', cat:['Versi awal aplikasi (sebelum penambahan nomor versi)'] }
+];
+function verLabel(){ return 'v' + APP_VERSION; }
+function verSideHTML(){
+  return '<div class="ver-side" onclick="showChangelog()" title="Lihat riwayat versi">Versi ' + APP_VERSION + '<br>Build ' + APP_BUILD + '</div>';
+}
+function showChangelog(){
+  var h = APP_CHANGELOG.map(function(c){
+    return '<div style="margin-bottom:14px"><b style="color:#0f4c81">v' + esc(c.v) + '</b> <span class="small">(' + esc(c.tgl) + ')</span>' +
+      '<ul style="margin:6px 0 0 18px;line-height:1.6;font-size:13px">' + c.cat.map(function(x){ return '<li>' + esc(x) + '</li>'; }).join('') + '</ul></div>';
+  }).join('');
+  openModal('Versi Aplikasi ' + verLabel() + ' (Build ' + APP_BUILD + ')', h);
+}
+(function(){
+  var a = document.getElementById('verLogin'); if(a) a.textContent = 'Versi ' + APP_VERSION + ' • Build ' + APP_BUILD;
+  var b = document.getElementById('verTop');   if(b) b.textContent = verLabel();
+  document.title = 'Aplikasi Layanan BK ' + verLabel();
+})();
+/* ====== END VERSI APLIKASI ====== */
+
+/* ====== LAPORAN KE ORANG TUA (WHATSAPP) ====== */
+var LO_TA_MULAI = '2026-07-01';
+var LO = { bulan:'', kelas:'', kirimKe:'both', ulang:false, data:null, loading:false, sel:{}, stop:false };
+
+function loTALabel(){ var y = +LO_TA_MULAI.substring(0,4); return y + '/' + (y+1); }
+function loFmtLong(d){ var p = String(d).substring(0,10).split('-'); return (+p[2]) + ' ' + monthName(+p[1]) + ' ' + p[0]; }
+function loBulanList(){
+  var out = [], sy = +LO_TA_MULAI.substring(0,4), sm = +LO_TA_MULAI.substring(5,7);
+  var t = parseDate(today()), ey = t.getFullYear(), em = t.getMonth()+1;
+  var y = sy, m = sm;
+  while(y < ey || (y === ey && m <= em)){
+    out.push({ v: y+'-'+pad2(m), label: monthName(m)+' '+y });
+    m++; if(m > 12){ m = 1; y++; }
+  }
+  if(!out.length) out.push({ v: LO_TA_MULAI.substring(0,7), label: monthName(sm)+' '+sy });
+  return out;
+}
+function loRange(){
+  var p = LO.bulan.split('-'), y = +p[0], m = +p[1];
+  var first = y+'-'+pad2(m)+'-01';
+  var last = y+'-'+pad2(m)+'-'+pad2(new Date(y, m, 0).getDate());
+  var t = today(); if(last > t) last = t;
+  if(first > last) first = last;
+  return { bFrom:first, bTo:last, tFrom:LO_TA_MULAI, tTo:last, bLabel: monthName(m)+' '+y };
+}
+function loSiswaList(){
+  var list = siswaSaya();
+  if(LO.kelas) list = list.filter(function(s){ return s.Kelas === LO.kelas; });
+  return list.slice().sort(function(a,b){
+    return String(a.Kelas||'').localeCompare(String(b.Kelas||'')) || String(a.Nama||'').localeCompare(String(b.Nama||''));
+  });
+}
+function loTargets(s){
+  var out = [];
+  var ay = String(s.NoHPAyah||'').trim(), ib = String(s.NoHPIbu||'').trim();
+  if((LO.kirimKe === 'both' || LO.kirimKe === 'ayah') && ay) out.push({ target:'ayah', phone:ay });
+  if((LO.kirimKe === 'both' || LO.kirimKe === 'ibu') && ib) out.push({ target:'ibu', phone:ib });
+  return out;
+}
+
+/* log anti-duplikat khusus laporan (terpisah dari log presensi/terlambat) */
+function loLogGet(){ try{ return JSON.parse(localStorage.getItem('bk_wa_laporan_log') || '{}') || {}; }catch(e){ return {}; } }
+function loLogSet(o){ try{ localStorage.setItem('bk_wa_laporan_log', JSON.stringify(o)); }catch(e){} }
+function loLogKey(nis, target){ return LO.bulan + '||' + nis + '||' + target; }
+function loSudahKirim(s){
+  var log = loLogGet(), ada = false;
+  ['ayah','ibu'].forEach(function(t){ if(log[loLogKey(s.NIS, t)]) ada = true; });
+  return ada;
+}
+
+function loHitung(hadir, telat, r){
+  var out = {};
+  function ent(nis){
+    nis = String(nis);
+    if(!out[nis]) out[nis] = { b:{S:[],I:[],A:[],T:[]}, t:{S:0,I:0,A:0,T:0} };
+    return out[nis];
+  }
+  var seen = {};
+  hadir.forEach(function(x){
+    var d = String(x.Tanggal||'').substring(0,10); if(!d) return;
+    seen[d+'|'+x.NIS] = String(x.Status||'').toUpperCase();
+  });
+  Object.keys(seen).forEach(function(k){
+    var st = seen[k]; if(['S','I','A'].indexOf(st) < 0) return;
+    var i = k.indexOf('|'), d = k.substring(0,i), nis = k.substring(i+1);
+    var e = ent(nis); e.t[st]++;
+    if(d >= r.bFrom && d <= r.bTo) e.b[st].push(d);
+  });
+  var seenT = {};
+  telat.forEach(function(x){
+    var d = String(x.Tanggal||'').substring(0,10); if(!d) return;
+    seenT[d+'|'+x.NIS] = true;
+  });
+  Object.keys(seenT).forEach(function(k){
+    var i = k.indexOf('|'), d = k.substring(0,i), nis = k.substring(i+1);
+    var e = ent(nis); e.t.T++;
+    if(d >= r.bFrom && d <= r.bTo) e.b.T.push(d);
+  });
+  return out;
+}
+function loEntri(nis){
+  return (LO.data && LO.data[String(nis)]) || { b:{S:[],I:[],A:[],T:[]}, t:{S:0,I:0,A:0,T:0} };
+}
+
+/* ---- template pesan (bisa diedit, disimpan di browser) ---- */
+var LO_TPL_KEY = 'bk_wa_laporan_tpl';
+var LO_VARS = [
+  ['{ortu}','Sapaan orang tua (Bapak/Ibu + nama)'],
+  ['{nama}','Nama siswa'], ['{nis}','NIS'], ['{kelas}','Kelas'],
+  ['{bulan}','Bulan laporan'], ['{tahun_ajaran}','Tahun ajaran'], ['{periode_ta}','Periode tahun ajaran'],
+  ['{laporan_bulan}','Bagian 1: laporan bulan (lengkap dengan judul)'],
+  ['{laporan_ta}','Bagian 2: laporan tahun ajaran (lengkap dengan judul)'],
+  ['{guru}','Nama guru BK'], ['{pengirim}','Bimbingan Konseling SMAN 1 Klirong + nama guru']
+];
+function loTemplateDefault(){
+  return "Assalamu'alaikum Wr. Wb.\n" +
+    "Yth. {ortu},\n" +
+    "Orang tua/wali dari:\n\n" +
+    "Nama   : *{nama}*\n" +
+    "NIS    : {nis}\n" +
+    "Kelas  : {kelas}\n\n" +
+    "Bersama ini kami dari Bimbingan Konseling SMAN 1 Klirong menyampaikan laporan presensi dan keterlambatan ananda.\n\n" +
+    "{laporan_bulan}\n\n" +
+    "{laporan_ta}\n\n" +
+    "Kami mohon Bapak/Ibu senantiasa membimbing dan mengarahkan ananda, baik di rumah maupun dalam kehidupan sehari-hari. Keberhasilan siswa hanya dapat dicapai melalui kerja sama yang baik antara sekolah, orang tua/wali, dan semua pihak.\n\n" +
+    "Terima kasih atas kerja sama Bapak/Ibu. 🙏\n" +
+    "Wassalamu'alaikum Wr. Wb.\n\n" +
+    "_{pengirim}_";
+}
+function loTemplate(){
+  try{ var v = localStorage.getItem(LO_TPL_KEY); if(v && v.trim()) return v; }catch(e){}
+  return loTemplateDefault();
+}
+function loSimpanTpl(v){
+  try{
+    if(!String(v||'').trim()) localStorage.removeItem(LO_TPL_KEY);
+    else localStorage.setItem(LO_TPL_KEY, v);
+  }catch(e){}
+  loCekTpl();
+}
+function loCekTpl(){
+  var el = document.getElementById('loTplInfo'); if(!el) return;
+  var t = loTemplate(), miss = [];
+  if(t.indexOf('{laporan_bulan}') < 0) miss.push('{laporan_bulan}');
+  if(t.indexOf('{laporan_ta}') < 0) miss.push('{laporan_ta}');
+  el.innerHTML = miss.length
+    ? '<span style="color:#c0392b">⚠️ Template tidak memuat ' + miss.join(' dan ') + ' — bagian laporan tersebut tidak akan terkirim.</span>'
+    : '✅ Tersimpan otomatis di browser ini.';
+}
+function loSisip(ph){
+  var ta = document.getElementById('loTpl'); if(!ta) return;
+  var st = ta.selectionStart, en = ta.selectionEnd;
+  if(typeof st !== 'number'){ st = en = ta.value.length; }
+  ta.value = ta.value.substring(0, st) + ph + ta.value.substring(en);
+  ta.focus(); ta.selectionStart = ta.selectionEnd = st + ph.length;
+  loSimpanTpl(ta.value);
+}
+function loResetTpl(){
+  confirmBox('Kembalikan template pesan ke teks standar? Perubahan yang Anda buat akan hilang.', function(){
+    try{ localStorage.removeItem(LO_TPL_KEY); }catch(e){}
+    var ta = document.getElementById('loTpl'); if(ta) ta.value = loTemplateDefault();
+    loCekTpl(); toast('Template dikembalikan ke standar');
+  });
+}
+function loPratinjauTpl(){
+  var list = loSiswaList();
+  if(!list.length){ toast('Tidak ada siswa untuk contoh','er'); return; }
+  var pilih = list.filter(function(x){ return loTargets(x).length; })[0] || list[0];
+  loPreview(pilih.NIS);
+}
+
+function loBuatPesan(s, target){
+  var r = loRange(), e = loEntri(s.NIS);
+  function tglList(arr){ return arr.slice().sort().map(function(d){ return +d.substring(8,10); }).join(', '); }
+  function barisB(label, arr, satuan){
+    return '• ' + label + ' : ' + arr.length + ' ' + satuan + (arr.length ? ' (tgl ' + tglList(arr) + ')' : '');
+  }
+  var bTot = e.b.S.length + e.b.I.length + e.b.A.length + e.b.T.length;
+  var tTot = e.t.S + e.t.I + e.t.A + e.t.T;
+  var blokB = ['📅 *1. LAPORAN BULAN ' + r.bLabel.toUpperCase() + '*'];
+  if(bTot === 0){
+    blokB.push('✅ Ananda selalu hadir dan tidak pernah terlambat.');
+  } else {
+    blokB.push(barisB('Sakit', e.b.S, 'hari'));
+    blokB.push(barisB('Izin', e.b.I, 'hari'));
+    blokB.push(barisB('Alpa', e.b.A, 'hari'));
+    blokB.push(barisB('Terlambat', e.b.T, 'kali'));
+  }
+  var periodeTA = loFmtLong(r.tFrom) + ' s.d. ' + loFmtLong(r.tTo);
+  var blokT = ['📚 *2. LAPORAN TAHUN AJARAN ' + loTALabel() + '*', '(' + periodeTA + ')'];
+  if(tTot === 0){
+    blokT.push('✅ Ananda selalu hadir dan tidak pernah terlambat.');
+  } else {
+    blokT.push('• Sakit : ' + e.t.S + ' hari');
+    blokT.push('• Izin : ' + e.t.I + ' hari');
+    blokT.push('• Alpa : ' + e.t.A + ' hari');
+    blokT.push('• Terlambat : ' + e.t.T + ' kali');
+  }
+  var ortu = target === 'ayah' ? ('Bapak ' + (s.NamaAyah||'')).trim()
+           : target === 'ibu'  ? ('Ibu ' + (s.NamaIbu||'')).trim() : 'Bapak/Ibu';
+  var guru = (ST.user && ST.user.role === 'gurubk' && ST.guru && ST.guru.Nama) ? ST.guru.Nama : '';
+  var vars = {
+    '{ortu}': ortu, '{nama}': s.Nama||'', '{nis}': s.NIS||'', '{kelas}': s.Kelas||'',
+    '{bulan}': r.bLabel, '{tahun_ajaran}': loTALabel(), '{periode_ta}': periodeTA,
+    '{laporan_bulan}': blokB.join('\n'), '{laporan_ta}': blokT.join('\n'),
+    '{guru}': guru, '{pengirim}': 'Bimbingan Konseling SMAN 1 Klirong' + (guru ? ' — ' + guru : '')
+  };
+  return renderTemplateWA(loTemplate(), vars).trim();
+}
+
+function renderLaporanOrtu(){
+  var bl = loBulanList();
+  if(!LO.bulan || !bl.some(function(b){ return b.v === LO.bulan; })) LO.bulan = bl[bl.length-1].v;
+  var ks = kelasSaya();
+  if(LO.kelas && ks.indexOf(LO.kelas) < 0) LO.kelas = '';
+  var optB = bl.map(function(b){ return '<option value="'+b.v+'"'+(b.v===LO.bulan?' selected':'')+'>'+esc(b.label)+'</option>'; }).join('');
+  var optK = '<option value="">Semua kelas</option>' + ks.map(function(k){ return '<option value="'+esc(k)+'"'+(k===LO.kelas?' selected':'')+'>'+esc(k)+'</option>'; }).join('');
+  $('#main').innerHTML =
+    '<div class="hd"><div><h2>📨 Laporan ke Orang Tua</h2><div class="sub">Kirim laporan presensi (Sakit, Izin, Alpa) dan keterlambatan siswa ke orang tua melalui WhatsApp</div></div>'+
+      '<div class="tools"><button class="btn4" onclick="loKirim()">📤 Kirim WA ke Orang Tua</button></div></div>'+
+    '<div class="card">'+
+      '<div class="fbar">'+
+        '<div class="fg"><label>Bulan Laporan</label><select onchange="loSetBulan(this.value)">'+optB+'</select></div>'+
+        '<div class="fg"><label>Kelas</label><select onchange="loSetKelas(this.value)">'+optK+'</select></div>'+
+        '<div class="fg"><label>Kirim ke</label><select onchange="loSetKirimKe(this.value)">'+
+          '<option value="both"'+(LO.kirimKe==='both'?' selected':'')+'>Ayah &amp; Ibu</option>'+
+          '<option value="ayah"'+(LO.kirimKe==='ayah'?' selected':'')+'>Ayah saja</option>'+
+          '<option value="ibu"'+(LO.kirimKe==='ibu'?' selected':'')+'>Ibu saja</option></select></div>'+
+        '<div class="fg" style="flex:0 0 auto"><button class="btn2" onclick="loLoad()">🔄 Muat Ulang</button></div>'+
+      '</div>'+
+      '<div class="hint" id="loInfo" style="margin:-4px 0 12px"></div>'+
+      '<label style="display:flex;align-items:center;gap:7px;font-weight:500;margin-bottom:12px"><input type="checkbox" style="width:auto" '+(LO.ulang?'checked':'')+' onchange="loSetUlang(this.checked)"> Kirim ulang juga ke orang tua yang laporannya sudah terkirim untuk bulan ini</label>'+
+      '<div id="loTable"></div>'+
+    '</div>'+
+    '<div class="card">'+
+      '<h2>✏️ Template Pesan WhatsApp</h2>'+
+      '<div class="sub">Ubah teks pesan yang dikirim ke orang tua. Variabel dalam kurung kurawal akan terisi otomatis untuk setiap siswa.</div>'+
+      '<div style="margin-bottom:10px">'+LO_VARS.map(function(v){ return '<button class="chip" style="border:none;cursor:pointer" title="'+esc(v[1])+'" onclick="loSisip(\''+v[0]+'\')">'+esc(v[0])+'</button>'; }).join('')+'</div>'+
+      '<div class="hint" style="margin:0 0 8px">Klik variabel untuk menyisipkannya di posisi kursor. Arahkan kursor ke variabel untuk melihat artinya. Gunakan *teks* untuk huruf tebal dan _teks_ untuk miring di WhatsApp.</div>'+
+      '<textarea id="loTpl" rows="18" style="min-height:300px;line-height:1.5" oninput="loSimpanTpl(this.value)">'+esc(loTemplate())+'</textarea>'+
+      '<div class="hint" id="loTplInfo" style="margin-top:6px"></div>'+
+      '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">'+
+        '<button class="btn" onclick="loPratinjauTpl()">👁 Pratinjau dengan Data Siswa</button>'+
+        '<button class="btn2" onclick="loResetTpl()">↩ Kembalikan ke Standar</button>'+
+      '</div>'+
+    '</div>';
+  loCekTpl();
+  loLoad();
+}
+function loSetBulan(v){ LO.bulan = v; loLoad(); }
+function loSetKelas(v){ LO.kelas = v; loPilihDefault(); loRenderTable(); }
+function loSetKirimKe(v){ LO.kirimKe = v; loPilihDefault(); loRenderTable(); }
+function loSetUlang(v){ LO.ulang = !!v; }
+function loPilihDefault(){
+  LO.sel = {};
+  loSiswaList().forEach(function(s){ if(loTargets(s).length) LO.sel[String(s.NIS)] = true; });
+}
+async function loLoad(){
+  var r = loRange();
+  LO.loading = true; LO.data = null; loRenderTable();
+  try{
+    var filters = {};
+    filters[SH.HADIR] = { since:r.tFrom, until:r.tTo };
+    filters[SH.TERLAMBAT] = { since:r.tFrom, until:r.tTo };
+    var batch = await api('batchGetData', { sheets:[SH.HADIR, SH.TERLAMBAT], filters:filters });
+    LO.data = loHitung(batch[SH.HADIR] || [], batch[SH.TERLAMBAT] || [], r);
+  }catch(e){
+    toast('Gagal memuat data: ' + e.message, 'er');
+  }
+  LO.loading = false;
+  loPilihDefault();
+  loRenderTable();
+}
+function loToggle(nis, on){ if(on) LO.sel[String(nis)] = true; else delete LO.sel[String(nis)]; loRenderTable(true); }
+function loToggleAll(on){
+  LO.sel = {};
+  if(on) loSiswaList().forEach(function(s){ if(loTargets(s).length) LO.sel[String(s.NIS)] = true; });
+  loRenderTable();
+}
+function loRenderTable(){
+  var el = document.getElementById('loTable'); if(!el) return;
+  var r = loRange();
+  var info = document.getElementById('loInfo');
+  if(info) info.innerHTML = '📅 Bagian 1: <b>' + esc(r.bLabel) + '</b> (' + loFmtLong(r.bFrom) + ' s.d. ' + loFmtLong(r.bTo) + ') &nbsp;•&nbsp; 📚 Bagian 2: <b>Tahun Ajaran ' + loTALabel() + '</b> (' + loFmtLong(r.tFrom) + ' s.d. ' + loFmtLong(r.tTo) + ')';
+  if(LO.loading){ el.innerHTML = '<div class="empty">⏳ Memuat data presensi dan keterlambatan…</div>'; return; }
+  if(!LO.data){ el.innerHTML = '<div class="empty">Data belum termuat. Klik <b>Muat Ulang</b>.</div>'; return; }
+  var list = loSiswaList();
+  if(!list.length){ el.innerHTML = '<div class="empty">Tidak ada siswa pada kelas yang dipilih.</div>'; return; }
+  var nSel = 0, nNoHP = 0, nSent = 0;
+  var rows = list.map(function(s){
+    var nis = String(s.NIS), e = loEntri(nis), tg = loTargets(s);
+    var hasAy = String(s.NoHPAyah||'').trim(), hasIb = String(s.NoHPIbu||'').trim();
+    var sent = loSudahKirim(s);
+    if(!tg.length) nNoHP++;
+    if(sent) nSent++;
+    if(LO.sel[nis]) nSel++;
+    function c(n, cls){ return '<td style="text-align:center">' + (n ? '<span class="tag '+cls+'">'+n+'</span>' : '<span class="small">0</span>') + '</td>'; }
+    return '<tr>'+
+      '<td><input type="checkbox" style="width:auto" '+(LO.sel[nis]?'checked':'')+(tg.length?'':' disabled')+' onchange="loToggle(\''+esc(nis)+'\',this.checked)"></td>'+
+      '<td><b>'+esc(s.Nama)+'</b><div class="small">'+esc(nis)+'</div></td>'+
+      '<td>'+esc(s.Kelas)+'</td>'+
+      c(e.b.S.length,'tb')+c(e.b.I.length,'ty')+c(e.b.A.length,'tr')+c(e.b.T.length,'tgray')+
+      c(e.t.S,'tb')+c(e.t.I,'ty')+c(e.t.A,'tr')+c(e.t.T,'tgray')+
+      '<td>'+(hasAy?'<span class="tag tg">Ayah</span> ':'<span class="tag tgray">–</span> ')+(hasIb?'<span class="tag tg">Ibu</span>':'<span class="tag tgray">–</span>')+'</td>'+
+      '<td>'+(sent?'<span class="tag tg">✅ Terkirim</span>':'<span class="small">Belum</span>')+'</td>'+
+      '<td><button class="btn2 btn-sm" onclick="loPreview(\''+esc(nis)+'\')">👁 Pratinjau</button></td>'+
+    '</tr>';
+  }).join('');
+  var allChecked = nSel > 0 && list.every(function(s){ return !loTargets(s).length || LO.sel[String(s.NIS)]; });
+  el.innerHTML =
+    '<div class="stat" style="margin-bottom:12px">'+
+      '<div class="sc"><div class="n">'+list.length+'</div><div class="l">Siswa</div></div>'+
+      '<div class="sc g"><div class="n">'+nSel+'</div><div class="l">Dipilih</div></div>'+
+      '<div class="sc y"><div class="n">'+nNoHP+'</div><div class="l">Tanpa No. WA</div></div>'+
+      '<div class="sc b"><div class="n">'+nSent+'</div><div class="l">Sudah terkirim (bulan ini)</div></div>'+
+    '</div>'+
+    '<div class="tw"><table style="min-width:980px"><thead>'+
+      '<tr><th rowspan="2"><input type="checkbox" style="width:auto" '+(allChecked?'checked':'')+' onchange="loToggleAll(this.checked)" title="Pilih semua"></th>'+
+      '<th rowspan="2">Siswa</th><th rowspan="2">Kelas</th>'+
+      '<th colspan="4" style="text-align:center">'+esc(r.bLabel)+'</th>'+
+      '<th colspan="4" style="text-align:center">TA '+loTALabel()+'</th>'+
+      '<th rowspan="2">No. WA</th><th rowspan="2">Status</th><th rowspan="2"></th></tr>'+
+      '<tr><th style="text-align:center">S</th><th style="text-align:center">I</th><th style="text-align:center">A</th><th style="text-align:center">T</th>'+
+      '<th style="text-align:center">S</th><th style="text-align:center">I</th><th style="text-align:center">A</th><th style="text-align:center">T</th></tr>'+
+    '</thead><tbody>'+rows+'</tbody></table></div>'+
+    '<div class="hint" style="margin-top:8px">S = Sakit, I = Izin, A = Alpa (hari) • T = Terlambat (kali). Siswa tanpa nomor WA orang tua tidak dapat dipilih.</div>';
+}
+
+function loCariSiswa(nis){
+  var res = null;
+  (ST.siswa||[]).forEach(function(s){ if(String(s.NIS) === String(nis)) res = s; });
+  return res;
+}
+function loPreview(nis){
+  var s = loCariSiswa(nis); if(!s) return;
+  var tg = loTargets(s);
+  var first = tg.length ? tg[0].target : (String(s.NoHPAyah||'').trim() ? 'ayah' : 'ibu');
+  var msg = loBuatPesan(s, first);
+  var foot = '<button class="btn2" onclick="closeModal()">Tutup</button>'+
+    '<button class="btn2" onclick="loSalin(\''+esc(nis)+'\')">📋 Salin</button>';
+  if(String(s.NoHPAyah||'').trim()) foot += '<button class="btn4" onclick="loBukaWA(\''+esc(nis)+'\',\'ayah\')">Buka WA Ayah</button>';
+  if(String(s.NoHPIbu||'').trim())  foot += '<button class="btn4" onclick="loBukaWA(\''+esc(nis)+'\',\'ibu\')">Buka WA Ibu</button>';
+  openModal('Pratinjau Pesan — ' + (s.Nama||''),
+    '<pre style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:13px;line-height:1.55;background:#e7f7dc;border-radius:10px;padding:14px">'+esc(msg)+'</pre>', foot);
+}
+function loSalin(nis){
+  var s = loCariSiswa(nis); if(!s) return;
+  var tg = loTargets(s);
+  var msg = loBuatPesan(s, tg.length ? tg[0].target : 'ayah');
+  try{ navigator.clipboard.writeText(msg).then(function(){ toast('Pesan disalin'); }, function(){ toast('Gagal menyalin','er'); }); }
+  catch(e){ toast('Gagal menyalin','er'); }
+}
+function loBukaWA(nis, target){
+  var s = loCariSiswa(nis); if(!s) return;
+  var phone = target === 'ayah' ? s.NoHPAyah : s.NoHPIbu;
+  var url = waLink(s.Nama, phone, loBuatPesan(s, target));
+  if(!url) return toast('Nomor WA tidak valid','er');
+  window.open(url, '_blank');
+}
+
+async function loKirim(){
+  if(!LO.data){ toast('Data belum termuat','er'); return; }
+  var list = loSiswaList().filter(function(s){ return LO.sel[String(s.NIS)]; });
+  if(!list.length){ toast('Pilih minimal satu siswa','er'); return; }
+  var log = loLogGet(), msgs = [], dup = 0;
+  list.forEach(function(s){
+    loTargets(s).forEach(function(t){
+      var lk = loLogKey(s.NIS, t.target);
+      if(log[lk] && !LO.ulang){ dup++; return; }
+      msgs.push({ to:t.phone, nis:s.NIS, nama:s.Nama, target:t.target, lk:lk, message:loBuatPesan(s, t.target) });
+    });
+  });
+  if(!msgs.length){ toast('Semua laporan untuk bulan ini sudah terkirim. Centang "Kirim ulang" jika ingin mengirim lagi.','inf'); return; }
+  if(!getWAGatewayUrl()){ toast('URL Gateway WhatsApp belum diatur di Setting','er'); return; }
+  toast('Memeriksa gateway WhatsApp…','inf');
+  var st = await cekStatusGatewayWA();
+  if(!st.ok){ toast('Gateway WA: ' + st.msg, 'er'); return; }
+  var r = loRange();
+  confirmBox('Kirim laporan ' + r.bLabel + ' + Tahun Ajaran ' + loTALabel() + ' ke ' + msgs.length + ' nomor WhatsApp orang tua (' + list.length + ' siswa)?' + (dup ? '\n' + dup + ' nomor dilewati karena sudah terkirim.' : ''), function(){
+    loJalankanKirim(msgs);
+  });
+}
+async function loJalankanKirim(msgs){
+  var gatewayUrl = getWAGatewayUrl();
+  var delayMs = parseInt((ST.setting && ST.setting.waDelayMs) || '3000', 10);
+  if(isNaN(delayMs) || delayMs < 1000) delayMs = 3000;
+  LO.stop = false;
+  openModal('Mengirim Laporan…',
+    '<div id="loProg" style="font-size:13.5px;line-height:1.7">Menyiapkan…</div>'+
+    '<div style="height:8px;background:#e8eef7;border-radius:6px;margin-top:10px;overflow:hidden"><div id="loBar" style="height:100%;width:0;background:#27ae60;transition:.2s"></div></div>'+
+    '<div id="loFail" class="small" style="margin-top:10px;max-height:120px;overflow-y:auto"></div>',
+    '<button class="btn3" id="loStopBtn" onclick="LO.stop=true;this.disabled=true;this.textContent=\'Menghentikan…\'">⏹ Hentikan</button>');
+  var ok = 0, gagal = 0, i = 0;
+  var log = loLogGet();
+  for(i = 0; i < msgs.length; i++){
+    if(LO.stop) break;
+    var m = msgs[i];
+    var prog = document.getElementById('loProg');
+    if(prog) prog.innerHTML = 'Mengirim ' + (i+1) + ' dari ' + msgs.length + '…<br><b>' + esc(m.nama) + '</b> (' + (m.target === 'ayah' ? 'Ayah' : 'Ibu') + ')<br>✅ Berhasil: ' + ok + ' &nbsp; ❌ Gagal: ' + gagal;
+    try{
+      var res = await fetch(gatewayUrl + '/send', {
+        method:'POST', headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ to:m.to, message:m.message })
+      });
+      if(res.ok){
+        ok++;
+        log[m.lk] = { ts:Date.now(), nama:m.nama, phone:m.to };
+        loLogSet(log);
+      } else {
+        gagal++;
+        var t = await res.text();
+        var f = document.getElementById('loFail');
+        if(f) f.innerHTML += '❌ ' + esc(m.nama) + ' (' + m.target + '): ' + esc(t.substring(0,120)) + '<br>';
+      }
+    }catch(e){
+      gagal++;
+      var f2 = document.getElementById('loFail');
+      if(f2) f2.innerHTML += '❌ ' + esc(m.nama) + ' (' + m.target + '): ' + esc(e.message) + '<br>';
+    }
+    var bar = document.getElementById('loBar');
+    if(bar) bar.style.width = Math.round((i+1) / msgs.length * 100) + '%';
+    if(i < msgs.length - 1 && !LO.stop) await new Promise(function(res2){ setTimeout(res2, delayMs); });
+  }
+  var sisa = msgs.length - ok - gagal;
+  var prog2 = document.getElementById('loProg');
+  if(prog2) prog2.innerHTML = (LO.stop ? '⏹ <b>Dihentikan.</b><br>' : '🎉 <b>Selesai.</b><br>') +
+    '✅ Berhasil: <b>' + ok + '</b> &nbsp; ❌ Gagal: <b>' + gagal + '</b>' + (sisa > 0 ? ' &nbsp; ⏸ Belum terkirim: <b>' + sisa + '</b>' : '');
+  var stopBtn = document.getElementById('loStopBtn');
+  if(stopBtn){
+    var foot = stopBtn.parentNode;
+    if(foot) foot.innerHTML = '<button class="btn" onclick="closeModal();loRenderTable()">Tutup</button>';
+  }
+  loRenderTable();
+}
+/* ====== END LAPORAN KE ORANG TUA ====== */
+
 var MENU = [
   {id:'dashboard', l:'Dashboard', i:'🏠', sec:'Utama'},
   {id:'inputhp',   l:'Data Kontak Saya', i:'📱', sec:'Data Saya', roles:['siswa']},
@@ -3017,6 +3589,7 @@ var MENU = [
   {id:'anekdot',   l:'Catatan Anekdot', i:'📝', sec:'Layanan BK', roles:['admin','gurubk']},
   {id:'lainlain',  l:'Lain-Lain', i:'📌', sec:'Layanan BK', roles:['admin','gurubk']},
   {id:'rekapitulasi', l:'Siswa Rawan', i:'📊', sec:'Pelaporan', roles:['admin','gurubk','tamu']},
+  {id:'laporanortu', l:'Laporan ke Orang Tua', i:'📨', sec:'Pelaporan', roles:['admin','gurubk']},
   {id:'report',    l:'Report', i:'📑', sec:'Pelaporan', roles:['admin','gurubk','tamu']}
 ];
 function buildMenu(){
@@ -3024,7 +3597,7 @@ function buildMenu(){
   if(role === 'siswa'){
     html = '<div class="sec">Data Saya</div>'+
       '<a href="#" data-p="inputhp" onclick="go(\'inputhp\');return false;"><i>📱</i>Data Kontak Saya</a>';
-    $('#side').innerHTML = html;
+    $('#side').innerHTML = html + verSideHTML();
     return;
   }
   MENU.forEach(function(m){
@@ -3032,7 +3605,7 @@ function buildMenu(){
     if(m.sec !== lastSec){ html += '<div class="sec">'+m.sec+'</div>'; lastSec=m.sec; }
     html += '<a href="#" data-p="'+m.id+'" onclick="go(\''+m.id+'\');return false;"><i>'+m.i+'</i>'+m.l+'</a>';
   });
-  $('#side').innerHTML = html;
+  $('#side').innerHTML = html + verSideHTML();
 }
 function go(page, _skipHistory){
   var menu = null;
@@ -3055,7 +3628,7 @@ function go(page, _skipHistory){
     panggilan:function(){ renderKegiatan('panggilan'); }, kasus:function(){ renderKegiatan('kasus'); },
     konferensi:function(){ renderKegiatan('konferensi'); }, alihtangan:function(){ renderKegiatan('alihtangan'); },
     anekdot:function(){ renderKegiatan('anekdot'); }, lainlain:function(){ renderKegiatan('lainlain'); },
-    rekapitulasi:renderRekapitulasi, report:renderReport
+    rekapitulasi:renderRekapitulasi, report:renderReport, laporanortu:renderLaporanOrtu
   };
   (R[page] || renderDashboard)();
   updateBackBtn();
@@ -3576,6 +4149,11 @@ function renderSetBackup(el){
       '<button class="btn5" onclick="pilihFileRestore()">📥 Restore dari File</button>'+
     '</div>'+
     '<div class="hint" style="margin-top:9px">💡 Backup mencakup <b>semua tabel</b> (termasuk akun login).</div>'+
+  '</div>'+
+  '<div class="card"><h2>🖼️ Tanda Tangan ke Storage</h2>'+
+    '<div class="sub">Pindahkan tanda tangan lama Home Visit &amp; Pertemuan Orang Tua dari database ke Supabase Storage (bucket <code>'+TTD_BUCKET+'</code>)</div>'+
+    '<button class="btn5" onclick="migrasiTTDKeStorage()">📦 Pindahkan Tanda Tangan Lama ke Storage</button>'+
+    '<div class="hint" style="margin-top:9px">⚠️ Buat bucket &amp; policy terlebih dahulu (lihat panduan SQL), lalu lakukan Backup sebelum menjalankan. Tanda tangan baru otomatis langsung ke Storage.</div>'+
   '</div>';
 }
 function renderSetPassword(el){
@@ -5216,8 +5794,8 @@ function renderKehadiran(){
   var activeTab = ST.khTab || 'harian';
   var tabs = [
     {id:'harian', label:'📅 Harian'},
+    {id:'daftar', label:'📋 Daftar Siswa Tidak Masuk Hari Ini'},
     {id:'matriks', label:'📊 Absen Bulanan'},
-    {id:'daftar', label:'📋 Daftar Absensi Hari Ini'},
     {id:'laporan', label:'📈 Laporan'}
   ];
   $('#main').innerHTML = '<div class="hd"><div><h2>📋 Presensi</h2><div class="sub">Kelola presensi siswa</div></div>'+
@@ -5316,7 +5894,7 @@ function loadKhHarian(tglView){
 }
 function renderKhDaftar(){
   var ks = (kelasSaya()||[]).slice().sort();
-  $('#khContent').innerHTML = '<div class="card"><div class="hd" style="margin-bottom:10px"><div><h2>📋 Daftar Absensi Hari Ini</h2><div class="sub">Siswa berstatus Sakit, Izin, atau Alpa pada '+esc(tglPanjang(today()))+'</div></div><div class="tools"><button class="btn2 btn-sm" onclick="loadKhDaftar(true)">↻ Perbarui</button></div></div>'+
+  $('#khContent').innerHTML = '<div class="card"><div class="hd" style="margin-bottom:10px"><div><h2>📋 Daftar Siswa Tidak Masuk Hari Ini</h2><div class="sub">Siswa berstatus Sakit, Izin, atau Alpa pada '+esc(tglPanjang(today()))+'</div></div><div class="tools"><button class="btn2 btn-sm" onclick="loadKhDaftar(true)">↻ Perbarui</button></div></div>'+
     '<div class="fbar" style="padding:8px 10px;margin-bottom:10px"><div class="fg" style="max-width:300px"><label>Kelas</label><select id="khDaftarKelas" onchange="loadKhDaftar(false)"><option value="">Semua kelas</option>'+ks.map(function(k){ return '<option value="'+esc(k)+'">'+esc(k)+'</option>'; }).join('')+'</select></div></div>'+
     '<div id="khDaftarView"><div class="empty">Memuat daftar absensi hari ini…</div></div></div>';
   loadKhDaftar(true);
@@ -6693,7 +7271,7 @@ function cetakLaporanMakalah(){
   if(!d || !d.html){ toast('Tampilkan dulu laporan','er'); return; }
   var w = window.open('', '_blank'); if(!w){ toast('Popup diblokir','er'); return; }
   var css = '@page{size:A4;margin:2cm 2.5cm}body{font-family:"Times New Roman",serif;color:#000;font-size:12pt;line-height:1.7}h1{text-align:center;font-size:16pt;margin:24px 0}h2.bab-title{text-align:center;font-size:14pt;margin:26px 0 16px;font-weight:bold}h2{font-size:13.5pt;font-weight:bold;text-align:center;text-transform:uppercase;margin:22px 0 12px}h3{font-size:12.5pt;font-weight:bold;margin:14px 0 8px}table.rp{width:100%;border-collapse:collapse;font-size:10.5pt;margin:8px 0 14px}table.rp th,table.rp td{border:1px solid #333;padding:5px 7px;vertical-align:top;text-align:left}table.rp th{background:#e8eef7;font-weight:bold;text-align:center}p{text-align:justify;margin:6px 0}ol,ul{margin:6px 0 10px 26px}.cover-page{text-align:center;padding-top:30px;page-break-after:always}.cover-page .cover-logo img{max-height:130px;max-width:130px}.cover-page h1{font-size:17pt;margin:50px 0;line-height:1.4}.cover-page .cover-periode{font-size:13pt;font-weight:600;margin:24px 0}.cover-page .cover-identitas{font-size:14pt;font-weight:bold;margin-top:50px}.page-break{page-break-before:always}table.toc-table{border:none;width:100%}table.toc-table td{border:none;padding:3px 0}table.toc-table td:last-child{text-align:right;width:70px;font-weight:600}table.toc-table .toc-bab{font-weight:bold;padding-top:10px}table.toc-table .toc-sub{padding-left:24px}';
-  var content = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Laporan BK</title><style>'+css+'</style></head><body>'+ d.html +'<scr'+'ipt>setTimeout(function(){window.print();},700);</scr'+'ipt></body></html>';
+  var content = '<!DOCTYPE html><html><head><meta charset="utf-8"><title>Laporan BK</title><style>'+css+'</style></head><body>'+ d.html +'<scr'+'ipt>(function(){var im=[].slice.call(document.images),n=im.length,d=0,f=0;function go(){if(f)return;f=1;setTimeout(function(){window.print();},300);}if(!n){go();return;}function one(){if(++d>=n)go();}im.forEach(function(i){if(i.complete)one();else{i.onload=one;i.onerror=one;}});setTimeout(go,4000);})();</scr'+'ipt></body></html>';
   w.document.write(content); w.document.close();
 }
 function renderRekapKegiatanReport(all, p){
@@ -6822,7 +7400,7 @@ function printLaporan(judul, head, body, extraHTML, subJudul, signatureHTML){
 function printRaw(judul, bodyHTML, signatureHTML){
   var w = window.open('', '_blank'); if(!w){ toast('Popup diblokir','er'); return; }
   var css = '@page{size:A4;margin:1.5cm}body{font-family:"Times New Roman",serif;color:#000;font-size:12.5pt;line-height:1.5}h2.rptitle{text-align:center;font-size:15pt;margin:14px 0 4px;text-transform:uppercase}.rpsub{text-align:center;font-size:11pt;margin-bottom:16px;color:#333}table.rp{width:100%;border-collapse:collapse;font-size:11pt;margin-top:10px}table.rp th,table.rp td{border:1px solid #000;padding:6px 8px;vertical-align:top;text-align:left}table.rp th{background:#e8eef7;font-weight:bold;text-align:center}table.rp td{white-space:pre-wrap}img{max-width:100%}';
-  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>'+esc(judul)+'</title><style>'+css+'</style></head><body>'+kopHTML()+bodyHTML+(signatureHTML||'')+'<scr'+'ipt>setTimeout(function(){window.print();},600);</scr'+'ipt></body></html>');
+  w.document.write('<!DOCTYPE html><html><head><meta charset="utf-8"><title>'+esc(judul)+'</title><style>'+css+'</style></head><body>'+kopHTML()+bodyHTML+(signatureHTML||'')+'<scr'+'ipt>(function(){var im=[].slice.call(document.images),n=im.length,d=0,f=0;function go(){if(f)return;f=1;setTimeout(function(){window.print();},300);}if(!n){go();return;}function one(){if(++d>=n)go();}im.forEach(function(i){if(i.complete)one();else{i.onload=one;i.onerror=one;}});setTimeout(go,4000);})();</scr'+'ipt></body></html>');
   w.document.close();
 }
 function exportExcel(filename, head, body){
