@@ -1663,6 +1663,47 @@ function formatPhoneForDB(n){
   if(s.indexOf('8') === 0) return '62' + s;
   return s;
 }
+/* Jeda antar pesan WhatsApp: minimal 10 detik + acak (hingga +40%) + istirahat panjang tiap 15 pesan agar pola kirim tidak seragam */
+var WA_BATCH_SIZE = 15, WA_BATCH_REST_MIN = 30000, WA_BATCH_REST_MAX = 60000;
+function waJedaMs(i, baseMs){
+  var ms = baseMs * (1 + Math.random() * 0.4);   /* 10–14 detik bila dasar 10 detik */
+  if((i + 1) % WA_BATCH_SIZE === 0) ms += WA_BATCH_REST_MIN + Math.random() * (WA_BATCH_REST_MAX - WA_BATCH_REST_MIN);
+  return Math.round(ms);
+}
+/* ====== PENGAMAN PENGIRIMAN WA: batas harian, jam kirim, berhenti saat gagal beruntun ====== */
+function waAturan(){
+  var st = ST.setting || {};
+  var mx = parseInt(st.waMaxPerHari || '120', 10); if(isNaN(mx) || mx < 1) mx = 120;
+  var gg = parseInt(st.waMaxGagal || '5', 10); if(isNaN(gg) || gg < 2) gg = 5;
+  var j1 = /^\d{2}:\d{2}$/.test(st.waJamMulai||'') ? st.waJamMulai : '07:00';
+  var j2 = /^\d{2}:\d{2}$/.test(st.waJamSelesai||'') ? st.waJamSelesai : '19:00';
+  return { maxHari:mx, maxGagal:gg, jamMulai:j1, jamSelesai:j2 };
+}
+function waHariIni(){
+  try{ var o = JSON.parse(localStorage.getItem('bk_wa_harian') || 'null'); if(o && o.tgl === today()) return o.n || 0; }catch(e){}
+  return 0;
+}
+function waHariTambah(){
+  try{ localStorage.setItem('bk_wa_harian', JSON.stringify({ tgl: today(), n: waHariIni() + 1 })); }catch(e){}
+}
+function waGerbang(jumlah){
+  var a = waAturan(), d = new Date();
+  var hhmm = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  if(hhmm < a.jamMulai || hhmm > a.jamSelesai)
+    return { ok:false, msg:'Di luar jam kirim WhatsApp ('+a.jamMulai+'–'+a.jamSelesai+'). Pesan tidak dikirim; coba lagi pada jam tersebut.' };
+  var sisa = a.maxHari - waHariIni();
+  if(sisa <= 0)
+    return { ok:false, msg:'Batas kirim harian ('+a.maxHari+' pesan) sudah tercapai. Lanjutkan besok.' };
+  return { ok:true, boleh:Math.min(jumlah, sisa), sisa:sisa, batas:a.maxHari };
+}
+/* Satu nomor orang tua saja: Ayah; bila nomor Ayah kosong/tidak valid -> Ibu */
+function waNomorOrtuUtama(s){
+  if(!s) return null;
+  var ay = String(s.NoHPAyah||'').trim(), ib = String(s.NoHPIbu||'').trim();
+  if(ay && s.StatusWAAyah !== 'tidak_valid') return { target:'ayah', phone:ay };
+  if(ib && s.StatusWAIbu !== 'tidak_valid') return { target:'ibu', phone:ib };
+  return null;
+}
 function waLink(nama, nomor, pesan){ var n=normPhone(nomor); if(!n) return ''; return 'https://wa.me/'+n+'?text='+encodeURIComponent(pesan||('Assalamualaikum '+(nama||'')+', ')); }
 function waIconSVG(){ return '<svg viewBox="0 0 24 24"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/></svg>'; }
 
@@ -1842,15 +1883,11 @@ async function kirimNotifikasiWAPresensi(rows, tanggal, options){
       '{status}': statusLabel,
       '{keterangan}': (r.Keterangan && r.Keterangan.trim()) ? r.Keterangan : 'tidak dicantumkan'
     };
-    if(String(s.NoHPAyah||'').trim()){
-      var vA = Object.assign({}, base, { '{ortu}': 'Ayah ' + (s.NamaAyah || '') });
-      allMessages.push({ to:s.NoHPAyah, nis:r.NIS, target:'ayah', status:statusLabel,
-        nama:r.Nama||s.Nama||'', tanggal:tanggal, message: renderTemplateWA(tpl, vA) });
-    }
-    if(String(s.NoHPIbu||'').trim()){
-      var vI = Object.assign({}, base, { '{ortu}': 'Ibu ' + (s.NamaIbu || '') });
-      allMessages.push({ to:s.NoHPIbu, nis:r.NIS, target:'ibu', status:statusLabel,
-        nama:r.Nama||s.Nama||'', tanggal:tanggal, message: renderTemplateWA(tpl, vI) });
+    var pu = waNomorOrtuUtama(s);
+    if(pu){
+      var vU = Object.assign({}, base, { '{ortu}': (pu.target==='ayah' ? 'Ayah ' + (s.NamaAyah || '') : 'Ibu ' + (s.NamaIbu || '')) });
+      allMessages.push({ to:pu.phone, nis:r.NIS, target:pu.target, status:statusLabel,
+        nama:r.Nama||s.Nama||'', tanggal:tanggal, message: renderTemplateWA(tpl, vU) });
     }
   });
   if(!allMessages.length){
@@ -1875,17 +1912,28 @@ async function kirimNotifikasiWAPresensi(rows, tanggal, options){
     return { sent:0, failed:0, alreadySent:alreadySent, statusChanged:statusChanged,
              allDuplicate:true, total:allMessages.length };
   }
+  var gb0 = waGerbang(messages.length);
+  if(!gb0.ok){
+    if(!options.silent) toast(gb0.msg, 'er');
+    return { sent:0, failed:0, error:gb0.msg, pending:messages.length, alreadySent:alreadySent };
+  }
+  var tertunda = messages.length - gb0.boleh;
+  if(tertunda > 0){
+    messages = messages.slice(0, gb0.boleh);
+    if(!options.silent) toast('Dibatasi '+gb0.boleh+' pesan (kuota harian). '+tertunda+' pesan belum dikirim — lanjutkan besok.', 'inf');
+  }
   var st = await cekStatusGatewayWA();
   if(!st.ok){
     if(!options.silent) toast('Gateway WA: ' + st.msg, 'er');
     return { sent:0, failed:0, error:st.msg, pending:messages.length, alreadySent:alreadySent };
   }
-  var delayMs = parseInt((ST.setting && ST.setting.waDelayMs) || '3000', 10);
-  if(isNaN(delayMs) || delayMs < 1000) delayMs = 3000;
+  var delayMs = parseInt((ST.setting && ST.setting.waDelayMs) || '10000', 10);
+  if(isNaN(delayMs) || delayMs < 10000) delayMs = 10000;
   var result = { sent:0, failed:0, total:messages.length, alreadySent:alreadySent,
                  statusChanged:statusChanged, details:[] };
+  var _gb = 0;
   for(var i=0; i<messages.length; i++){
-    var m = messages[i];
+    var m = messages[i]; var _s0 = result.sent;
     try{
       var res = await fetch(gatewayUrl + '/send', {
         method:'POST',
@@ -1905,8 +1953,17 @@ async function kirimNotifikasiWAPresensi(rows, tanggal, options){
       result.failed++;
       result.details.push({ ok:false, nis:m.nis, target:m.target, error:e.message });
     }
+    if(result.sent > _s0){ waHariTambah(); _gb = 0; }
+    else {
+      _gb++;
+      if(_gb >= waAturan().maxGagal){
+        result.dihentikan = true;
+        result.error = 'Pengiriman dihentikan otomatis karena ' + _gb + ' pesan gagal beruntun. Periksa gateway WhatsApp.';
+        break;
+      }
+    }
     if(options.onProgress) options.onProgress(i+1, messages.length);
-    if(i < messages.length-1) await new Promise(function(r){ setTimeout(r, delayMs); });
+    if(i < messages.length-1) await new Promise(function(r){ setTimeout(r, waJedaMs(i, delayMs)); });
   }
   return result;
 }
@@ -1944,15 +2001,11 @@ async function kirimNotifikasiWATerlambat(rows, options){
       '{status}': 'Terlambat',
       '{petugas}': r.Petugas || '-'
     };
-    if(String(s.NoHPAyah||'').trim()){
-      var vA = Object.assign({}, base, { '{ortu}': 'Ayah ' + (s.NamaAyah || '') });
-      allMessages.push({ to:s.NoHPAyah, nis:r.NIS, target:'ayah', status:'Terlambat',
-        nama:r.Nama||s.Nama||'', tanggal:r.Tanggal, message: renderTemplateWA(tpl, vA) });
-    }
-    if(String(s.NoHPIbu||'').trim()){
-      var vI = Object.assign({}, base, { '{ortu}': 'Ibu ' + (s.NamaIbu || '') });
-      allMessages.push({ to:s.NoHPIbu, nis:r.NIS, target:'ibu', status:'Terlambat',
-        nama:r.Nama||s.Nama||'', tanggal:r.Tanggal, message: renderTemplateWA(tpl, vI) });
+    var pu = waNomorOrtuUtama(s);
+    if(pu){
+      var vU = Object.assign({}, base, { '{ortu}': (pu.target==='ayah' ? 'Ayah ' + (s.NamaAyah || '') : 'Ibu ' + (s.NamaIbu || '')) });
+      allMessages.push({ to:pu.phone, nis:r.NIS, target:pu.target, status:'Terlambat',
+        nama:r.Nama||s.Nama||'', tanggal:r.Tanggal, message: renderTemplateWA(tpl, vU) });
     }
   });
   if(!allMessages.length){
@@ -1973,16 +2026,27 @@ async function kirimNotifikasiWATerlambat(rows, options){
     if(!options.silent) toast('✅ Semua ' + alreadySent + ' pesan sudah pernah terkirim.', 'inf');
     return { sent:0, failed:0, alreadySent:alreadySent, allDuplicate:true, total:allMessages.length };
   }
+  var gb0 = waGerbang(messages.length);
+  if(!gb0.ok){
+    if(!options.silent) toast(gb0.msg, 'er');
+    return { sent:0, failed:0, error:gb0.msg, pending:messages.length, alreadySent:alreadySent };
+  }
+  var tertunda = messages.length - gb0.boleh;
+  if(tertunda > 0){
+    messages = messages.slice(0, gb0.boleh);
+    if(!options.silent) toast('Dibatasi '+gb0.boleh+' pesan (kuota harian). '+tertunda+' pesan belum dikirim — lanjutkan besok.', 'inf');
+  }
   var st = await cekStatusGatewayWA();
   if(!st.ok){
     if(!options.silent) toast('Gateway WA: ' + st.msg, 'er');
     return { sent:0, failed:0, error:st.msg, pending:messages.length, alreadySent:alreadySent };
   }
-  var delayMs = parseInt((ST.setting && ST.setting.waDelayMs) || '3000', 10);
-  if(isNaN(delayMs) || delayMs < 1000) delayMs = 3000;
+  var delayMs = parseInt((ST.setting && ST.setting.waDelayMs) || '10000', 10);
+  if(isNaN(delayMs) || delayMs < 10000) delayMs = 10000;
   var result = { sent:0, failed:0, total:messages.length, alreadySent:alreadySent, details:[] };
+  var _gb = 0;
   for(var i=0; i<messages.length; i++){
-    var m = messages[i];
+    var m = messages[i]; var _s0 = result.sent;
     try{
       var res = await fetch(gatewayUrl + '/send', {
         method:'POST',
@@ -2002,8 +2066,17 @@ async function kirimNotifikasiWATerlambat(rows, options){
       result.failed++;
       result.details.push({ ok:false, nis:m.nis, target:m.target, error:e.message });
     }
+    if(result.sent > _s0){ waHariTambah(); _gb = 0; }
+    else {
+      _gb++;
+      if(_gb >= waAturan().maxGagal){
+        result.dihentikan = true;
+        result.error = 'Pengiriman dihentikan otomatis karena ' + _gb + ' pesan gagal beruntun. Periksa gateway WhatsApp.';
+        break;
+      }
+    }
     if(options.onProgress) options.onProgress(i+1, messages.length);
-    if(i < messages.length-1) await new Promise(function(r){ setTimeout(r, delayMs); });
+    if(i < messages.length-1) await new Promise(function(r){ setTimeout(r, waJedaMs(i, delayMs)); });
   }
   return result;
 }
@@ -2038,9 +2111,8 @@ function _konfirmasiKirimWAManual(targets, tgl){
     if(!s) return;
     var stUp = String(r.Status||'').toUpperCase();
     var statusLabel = stUp==='S'?'Sakit':stUp==='I'?'Izin':'Alpa';
-    ['ayah','ibu'].forEach(function(tgt){
-      var phone = tgt==='ayah' ? s.NoHPAyah : s.NoHPIbu;
-      if(!String(phone||'').trim()) return;
+    var _pu = waNomorOrtuUtama(s); if(!_pu) return;
+    [_pu.target].forEach(function(tgt){
       totalNomor++;
       var check = waWasSent(tgl, r.NIS, tgt, statusLabel, 'presensi');
       if(check.sent) sudahKirim++; else akanKirim++;
@@ -2118,9 +2190,8 @@ function _konfirmasiKirimWATerlambat(targets, dari, sampai){
     var s = siswaMap[String(r.NIS)];
     if(!s) return;
     unikSiswa[String(r.NIS)] = true;
-    ['ayah','ibu'].forEach(function(tgt){
-      var phone = tgt==='ayah' ? s.NoHPAyah : s.NoHPIbu;
-      if(!String(phone||'').trim()) return;
+    var _pu = waNomorOrtuUtama(s); if(!_pu) return;
+    [_pu.target].forEach(function(tgt){
       totalNomor++;
       var check = waWasSent(r.Tanggal, r.NIS, tgt, 'Terlambat', 'terlambat');
       if(check.sent) sudahKirim++; else akanKirim++;
@@ -3455,6 +3526,8 @@ var APP_VERSION = '1.4.6';
 var APP_BUILD   = '2026-10-19';
 var APP_CHANGELOG = [
   { v:'1.4.6', tgl:'2026-10-19', cat:[
+    'Pengiriman WhatsApp: jeda minimal 10 detik (diacak 10–14 detik) + istirahat tiap 15 pesan; batas pesan per hari, jam kirim, dan berhenti otomatis saat gagal beruntun (diatur di Setting > WhatsApp)',
+    'Pengiriman WhatsApp ke orang tua hanya ke satu nomor: Ayah, jika tidak ada → Ibu',
     'Tampilan realtime: setiap data yang ditambah, diubah, atau dihapus langsung memperbarui tampilan di semua menu tanpa muat ulang halaman (membutuhkan Realtime aktif pada tabel Supabase)',
     'Bimbingan Kelompok: kolom Jumlah Hadir dan Tidak Hadir dihapus dari form, daftar kegiatan, dan cetak laporan; kolom Kelas dihapus dari daftar kegiatan',
     'Bimbingan Kelompok: Petugas Pelaksana dihapus dari form dan terisi otomatis sesuai akun Guru BK yang menginput',
@@ -3647,8 +3720,9 @@ function loSiswaList(){
 function loTargets(s){
   var out = [];
   var ay = String(s.NoHPAyah||'').trim(), ib = String(s.NoHPIbu||'').trim();
-  if((LO.kirimKe === 'both' || LO.kirimKe === 'ayah') && ay) out.push({ target:'ayah', phone:ay });
-  if((LO.kirimKe === 'both' || LO.kirimKe === 'ibu') && ib) out.push({ target:'ibu', phone:ib });
+  if(LO.kirimKe === 'ayah'){ if(ay) out.push({ target:'ayah', phone:ay }); }
+  else if(LO.kirimKe === 'ibu'){ if(ib) out.push({ target:'ibu', phone:ib }); }
+  else { var pu = waNomorOrtuUtama(s); if(pu) out.push(pu); }   /* otomatis: Ayah, jika tidak ada → Ibu */
   return out;
 }
 
@@ -3822,7 +3896,7 @@ function renderLaporanPresensi(){
         '<div class="fg"><label>Bulan Laporan</label><select onchange="loSetBulan(this.value)">'+optB+'</select></div>'+
         '<div class="fg"><label>Kelas</label><select onchange="loSetKelas(this.value)">'+optK+'</select></div>'+
         '<div class="fg"><label>Kirim ke</label><select onchange="loSetKirimKe(this.value)">'+
-          '<option value="both"'+(LO.kirimKe==='both'?' selected':'')+'>Ayah &amp; Ibu</option>'+
+          '<option value="both"'+(LO.kirimKe==='both'?' selected':'')+'>Otomatis: Ayah, jika tidak ada → Ibu</option>'+
           '<option value="ayah"'+(LO.kirimKe==='ayah'?' selected':'')+'>Ayah saja</option>'+
           '<option value="ibu"'+(LO.kirimKe==='ibu'?' selected':'')+'>Ibu saja</option></select></div>'+
         '<div class="fg" style="flex:0 0 auto"><button class="btn2" onclick="loLoad()">🔄 Muat Ulang</button></div>'+
@@ -3983,8 +4057,15 @@ async function loJalankanKirim(msgs, opts){
   opts = opts || {};
   LO.afterFn = opts.after || loRenderTable;
   var gatewayUrl = getWAGatewayUrl();
-  var delayMs = parseInt((ST.setting && ST.setting.waDelayMs) || '3000', 10);
-  if(isNaN(delayMs) || delayMs < 1000) delayMs = 3000;
+  var delayMs = parseInt((ST.setting && ST.setting.waDelayMs) || '10000', 10);
+  if(isNaN(delayMs) || delayMs < 10000) delayMs = 10000;
+  var gL = waGerbang(msgs.length);
+  if(!gL.ok){ toast(gL.msg, 'er'); return; }
+  if(gL.boleh < msgs.length){
+    toast('Dibatasi '+gL.boleh+' pesan (kuota harian). Sisanya kirim besok.', 'inf');
+    msgs = msgs.slice(0, gL.boleh);
+  }
+  var henti = false, gbL = 0;
   LO.stop = false;
   openModal(opts.title || 'Mengirim Laporan…',
     '<div id="loProg" style="font-size:13.5px;line-height:1.7">Menyiapkan…</div>'+
@@ -3995,7 +4076,7 @@ async function loJalankanKirim(msgs, opts){
   var log = loLogGet();
   for(i = 0; i < msgs.length; i++){
     if(LO.stop) break;
-    var m = msgs[i];
+    var m = msgs[i]; var ok0 = ok;
     var prog = document.getElementById('loProg');
     if(prog) prog.innerHTML = 'Mengirim ' + (i+1) + ' dari ' + msgs.length + '…<br><b>' + esc(m.nama) + '</b> (' + (m.target === 'ayah' ? 'Ayah' : (m.target === 'siswa' ? 'Siswa' : 'Ibu')) + ')<br>✅ Berhasil: ' + ok + ' &nbsp; ❌ Gagal: ' + gagal;
     try{
@@ -4017,13 +4098,15 @@ async function loJalankanKirim(msgs, opts){
       var f2 = document.getElementById('loFail');
       if(f2) f2.innerHTML += '❌ ' + esc(m.nama) + ' (' + m.target + '): ' + esc(e.message) + '<br>';
     }
+    if(ok > ok0){ waHariTambah(); gbL = 0; }
+    else { gbL++; if(gbL >= waAturan().maxGagal){ henti = true; LO.stop = true; } }
     var bar = document.getElementById('loBar');
     if(bar) bar.style.width = Math.round((i+1) / msgs.length * 100) + '%';
-    if(i < msgs.length - 1 && !LO.stop) await new Promise(function(res2){ setTimeout(res2, delayMs); });
+    if(i < msgs.length - 1 && !LO.stop) await new Promise(function(res2){ setTimeout(res2, waJedaMs(i, delayMs)); });
   }
   var sisa = msgs.length - ok - gagal;
   var prog2 = document.getElementById('loProg');
-  if(prog2) prog2.innerHTML = (LO.stop ? '⏹ <b>Dihentikan.</b><br>' : '🎉 <b>Selesai.</b><br>') +
+  if(prog2) prog2.innerHTML = (henti ? '⚠️ <b>Dihentikan otomatis</b> karena ' + gbL + ' pesan gagal beruntun. Periksa gateway WhatsApp.<br>' : LO.stop ? '⏹ <b>Dihentikan.</b><br>' : '🎉 <b>Selesai.</b><br>') +
     '✅ Berhasil: <b>' + ok + '</b> &nbsp; ❌ Gagal: <b>' + gagal + '</b>' + (sisa > 0 ? ' &nbsp; ⏸ Belum terkirim: <b>' + sisa + '</b>' : '');
   var stopBtn = document.getElementById('loStopBtn');
   if(stopBtn){
@@ -4723,7 +4806,8 @@ function renderSetWA(el){
   var url   = s.waGatewayUrl || 'http://localhost:3000';
   var auto  = String(s.waAutoSend || '0') === '1';
   var autoTlt = String(s.waAutoSendTerlambat || '0') === '1';
-  var delay = s.waDelayMs || '3000';
+  var wMax = String(s.waMaxPerHari || '120'), wJ1 = s.waJamMulai || '07:00', wJ2 = s.waJamSelesai || '19:00', wGg = String(s.waMaxGagal || '5');
+  var delay = String(Math.max(10000, parseInt(s.waDelayMs || '10000', 10) || 10000));
   var tpl   = s.waTemplate || defaultWaTemplate();
   var tplTlt = s.waTemplateTerlambat || defaultWaTemplateTerlambat();
   var scope = s.waManualScope || 'all';
@@ -4760,8 +4844,16 @@ function renderSetWA(el){
     '</div>' +
 
     '<div class="fg"><label>Jeda Antar Pesan (ms)</label>' +
-      '<input id="setWaDelay" type="number" min="1500" step="500" value="'+esc(delay)+'">' +
-      '<div class="hint">Minimal 1500 ms. Disarankan 3000–5000 ms agar nomor tidak diblokir WA.</div>' +
+      '<input id="setWaDelay" type="number" min="10000" step="1000" value="'+esc(delay)+'">' +
+      '<div class="hint">Minimal 10000 ms (10 detik). Jeda sebenarnya diacak 10–14 detik, dan ada istirahat 30–60 detik tiap 15 pesan.</div>' +
+    '</div>' +
+    '<div class="row r2">' +
+      '<div class="fg"><label>Batas Pesan per Hari</label><input id="setWaMax" type="number" min="1" step="10" value="'+esc(wMax)+'"><div class="hint">Sisa pesan otomatis dikirim keesokan harinya (dihitung per browser/laptop ini).</div></div>' +
+      '<div class="fg"><label>Berhenti Otomatis Setelah Gagal Beruntun</label><input id="setWaGagal" type="number" min="2" step="1" value="'+esc(wGg)+'"><div class="hint">Pengiriman berhenti bila sekian pesan gagal berturut-turut.</div></div>' +
+    '</div>' +
+    '<div class="row r2">' +
+      '<div class="fg"><label>Jam Kirim Mulai</label><input id="setWaJam1" type="time" value="'+esc(wJ1)+'"></div>' +
+      '<div class="fg"><label>Jam Kirim Selesai</label><input id="setWaJam2" type="time" value="'+esc(wJ2)+'"><div class="hint">Di luar jam ini pesan tidak dikirim.</div></div>' +
     '</div>' +
 
     '<div class="row r2">' +
@@ -4804,7 +4896,11 @@ function simpanSettingWA(){
     waGatewayUrl:        (document.getElementById('setWaUrl').value||'').trim().replace(/\/+$/,''),
     waTemplate:          document.getElementById('setWaTpl').value || defaultWaTemplate(),
     waTemplateTerlambat: document.getElementById('setWaTplTlt').value || defaultWaTemplateTerlambat(),
-    waDelayMs:           String(parseInt(document.getElementById('setWaDelay').value||'3000',10) || 3000),
+    waDelayMs:           String(Math.max(10000, parseInt(document.getElementById('setWaDelay').value||'10000',10) || 10000)),
+    waMaxPerHari:        String(Math.max(1, parseInt(document.getElementById('setWaMax').value||'120',10) || 120)),
+    waMaxGagal:          String(Math.max(2, parseInt(document.getElementById('setWaGagal').value||'5',10) || 5)),
+    waJamMulai:          document.getElementById('setWaJam1').value || '07:00',
+    waJamSelesai:        document.getElementById('setWaJam2').value || '19:00',
     waAutoSend:          document.getElementById('setWaAuto').value === '1' ? '1' : '0',
     waAutoSendTerlambat: document.getElementById('setWaAutoTlt').value === '1' ? '1' : '0',
     waManualScope:       document.getElementById('setWaScope').value === 'ampu' ? 'ampu' : 'all'
